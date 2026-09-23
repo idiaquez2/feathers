@@ -1,0 +1,639 @@
+---
+title: "analyses feather structure"
+author: "david lopez idiaquez"
+date: "2026-06-06"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(lmerTest)
+library(emmeans)
+library(ggeffects)
+library(multcomp)
+library(cowplot)
+```
+
+#0. Import and clean data
+```{r}
+FeatherAd_db <- read_csv("feather.csv")
+```
+
+#1. Are there differences in the feather microstructure between the urban and rural habitat
+##1.1 Model
+```{r}
+FeatherAd_db$area_habitat<-paste(FeatherAd_db$area, FeatherAd_db$habitat, sep="_")
+
+#change names
+FeatherAd_db <- FeatherAd_db %>%
+  mutate(habitat = factor(habitat, levels = c("Urban", "Forest"), labels = c("Urban", "Rural")))
+
+model_habitat <- lmer(mean_density ~ habitat + sex + age + habitat*age + (1|area_habitat)+ (1|area) +(1|id), data=FeatherAd_db) 
+summary(model_habitat)
+anova(model_habitat)
+
+plot(predict_response(model_habitat, terms="habitat"))
+
+#some tests
+hist(residuals(model_habitat))
+qqnorm(resid(model_habitat))
+qqline(resid(model_habitat), col = "red")
+
+model_habitat_2 <- lmer(mean_density ~ habitat + sex + age + (1|area_habitat)+(1|area) +(1|id), data=FeatherAd_db) 
+summary(model_habitat_2)
+anova(model_habitat_2)
+
+#some tests
+hist(residuals(model_habitat_2))
+qqnorm(resid(model_habitat_2))
+qqline(resid(model_habitat_2), col = "red")
+```
+
+##1.2 Plot
+```{r}
+pred_general <- as.data.frame(predict_response(model_habitat, terms = "habitat"))
+
+p1 <- ggplot() +
+  # --- Jittered raw data points ---
+  geom_jitter(
+    data = FeatherAd_db,
+    aes(x = habitat, y = mean_density, colour = habitat),
+    width  = 0.15,
+    height = 0,
+    size   = 1.8,
+    alpha  = 0.35,
+    shape  = 19
+  ) +
+    # --- Confidence interval error bars ---
+  geom_errorbar(
+    data = pred_general,
+    aes(x = x, ymin = predicted-std.error, ymax = predicted+std.error),
+    colour="black",
+    width     = 0.08,
+    linewidth = 1.0
+  ) +
+  # --- Predicted mean points ---
+  geom_point(
+    data = pred_general,
+    aes(x = x, y = predicted, fill = x),
+    size  = 5,
+    shape = 21,
+    stroke = 1.5
+  ) +
+
+  # --- Colours for Forest vs Urban ---
+  scale_fill_manual(
+    values = c(
+      "Rural" = "springgreen4",
+      "Urban"  = "grey50"
+    )
+  ) +
+    scale_color_manual(
+    values = c(
+      "Rural" = "springgreen4",
+      "Urban"  = "grey50"
+    )
+  ) +
+
+  labs(
+    x      = "Habitat",
+    y      = "Mean barbule density (barbules/mm)"
+  ) +
+
+  theme_bw(base_size = 20) +
+  theme(
+    legend.position = "none",
+    axis.text.x     = element_text(size = 14, face = "bold"),
+    axis.title.x    = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+  )+
+  scale_y_continuous(
+  limits = c(14.9, 27),           # min and max of y axis
+  breaks = seq(16, 26, by = 2)  # breaks every 2 units: 16, 18, 20, 22, 24, 26
+)
+  
+p1
+
+#ggsave("per_pop.png", plot = p1, width = 8, height = 7, dpi = 600)
+```
+
+#2. Are the urban effects consisten across space
+##2.1 Model
+```{r}
+model_space <- lmer(mean_density ~ habitat*area + sex + age + (1|id), data=FeatherAd_db) 
+summary(model_space)
+anova(model_space) 
+
+#the interaction is not significant, meaning the (lack of) effects of habitat are consistent in space
+FeatherAd_db2<-FeatherAd_db
+FeatherAd_db2$area <- factor(FeatherAd_db2$area,
+                             levels = c("Lisbon", "Madrid", "Milan", "Malmo", "Goteborg"),
+                             labels = c("Lisbon", "Madrid", "Milan", "Malmo", "Gothenburg"))
+
+
+model_space_2 <- lmer(mean_density ~ habitat+area + sex + age + (1|id), data=FeatherAd_db2) 
+summary(model_space_2)
+anova(model_space_2) 
+```
+
+###2.1.1 Post hoc test
+```{r}
+#Marginal means per area
+emm_area <- emmeans(model_space_2, ~ area)
+emm_area
+
+#Pairwise comparisons
+pairs_area <- pairs(emm_area, adjust = "tukey")
+summary(pairs_area)
+confint(pairs_area)
+
+#Put letters for the differences beween areas
+library(multcomp)
+cld(emm_area, adjust = "tukey", Letters = letters)
+
+#Letters
+cld_df <- as.data.frame(cld(emm_area, adjust = "tukey", Letters = letters))
+cld_df$.group <- trimws(cld_df$.group)  # remove whitespace from letters
+```
+
+### 2.2.2 Plot
+```{r}
+# Order the pops.
+lat_order <- c("Lisbon", "Madrid", "Milan", "Malmo", "Gothenburg")
+
+FeatherAd_db2$area  <- factor(FeatherAd_db2$area,  levels = lat_order)
+cld_df$area        <- factor(cld_df$area,        levels = lat_order)
+
+#Model predictions
+pred_space     <- predict_response(model_space_2, terms = c("area", "habitat"))
+pred_space_df  <- as.data.frame(pred_space)
+pred_space_df$x <- factor(pred_space_df$x, levels = lat_order)
+
+#Label position
+label_pos <- pred_space_df %>%
+  group_by(x) %>%
+  summarise(label_y = max(predicted + std.error) + 0.3)
+
+cld_df <- cld_df %>%
+  left_join(label_pos, by = c("area" = "x"))
+
+#Color
+hab_colours <- c("Rural" = "springgreen4", "Urban" = "grey50")
+
+p2 <- ggplot() +
+  # --- Raw jittered points ---
+  geom_jitter(
+    data   = FeatherAd_db2,
+    aes(x = area, y = mean_density, colour = habitat),
+    width  = 0.2,
+    height = 0,
+    size   = 1.5,
+    alpha  = 0.3,
+    shape  = 16
+  ) +
+  # --- SE error bars ---
+  geom_errorbar(
+    data = pred_space_df,
+    aes(x = x, ymin = predicted - std.error, ymax = predicted + std.error,
+        colour = group),
+    width     = 0.1,
+    linewidth = 0.9,
+    position  = position_dodge(width = 0.5)
+  ) +
+  # --- Predicted means ---
+  geom_point(
+    data = pred_space_df,
+    aes(x = x, y = predicted, fill = group),
+    size     = 4,
+    shape    = 21,
+    stroke   = 1.2,
+    position = position_dodge(width = 0.5)
+  ) +
+  # --- CLD letters ---
+  geom_text(
+    data    = cld_df,
+    aes(x   = area, label = .group),
+    y       = 14.7,
+    size    = 4,
+    colour  = "black"
+  ) +
+  scale_y_continuous(
+    limits = c(14.9, 27),
+    breaks = seq(16, 26, by = 2)
+  ) +
+  scale_fill_manual(values   = hab_colours) +
+  scale_colour_manual(values = hab_colours) +
+  labs(
+    y      = "",
+    fill   = "Habitat",
+    colour = "Habitat"
+  ) +
+    labs(
+    x      = "Area",
+    y      = "Mean barbule density (barbules/mm)"
+  ) +
+  theme_bw(base_size = 20) +
+  theme(
+    legend.position    = "none",
+    axis.title.x       = element_blank(),
+    axis.text.x     = element_text(size = 14, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+  )
+
+p2
+
+#ggsave("Plots brevia/per_pop.png", plot = p2, width = 8, height = 7, dpi = 600)
+```
+
+#4. Exploring the effects of latitude, temperature and elevation
+##4.1 add elevation, temperature and latitude
+```{r}
+elevation <- read.csv("elevation.csv")
+
+elevation2 <- elevation %>% 
+  mutate(habitat = area,
+         area = city)
+
+elevation2 <- elevation2 %>% 
+  dplyr::select(habitat, area, elevation, latitude)
+
+FeatherAd_db2$latitude <- NULL
+FeatherAd_db2 <- left_join(FeatherAd_db2, elevation2, by = c("habitat", "area"))
+FeatherAd_db2$elevation <- as.numeric(FeatherAd_db2$elevation)
+
+# sanity check — should return 0 rows if the join worked fully
+anti_join(FeatherAd_db2, elevation2, by = c("habitat", "area")) %>% nrow()
+
+#tmean
+tmean_long_filt <- read_csv("tmean_long_filt.csv")
+tmean_long_filt$...1 <- NULL
+
+# same reasoning — removed the two ifelse() recodes that reintroduced
+# "Goteborg" and "Forest", which no longer match FeatherAd_db2
+tmean_long_filt <- tmean_long_filt %>% 
+  rename(habitat = area,
+         area = city)
+
+FeatherAd_db2 <- left_join(FeatherAd_db2, tmean_long_filt, by = c("habitat", "area"))
+
+# sanity check
+anti_join(FeatherAd_db2, tmean_long_filt, by = c("habitat", "area")) %>% nrow()
+```
+
+##4.2 Model latitude
+```{r}
+model_latitude <- lmer(mean_density ~  sex + (latitude) + (1|area_habitat)+ (1|area) +(1|id), data=FeatherAd_db2) 
+summary(model_latitude)
+anova(model_latitude) #No significant effects
+```
+
+##4.2 Model elevation
+```{r}
+model_elevation <- lmer(mean_density ~  sex + age + elevation + (1|area_habitat) + (1|area) +(1|id), data=FeatherAd_db2) 
+summary(model_elevation)
+anova(model_elevation) 
+
+# summarise mean ± SE per area_habitat (elevation is constant within each)
+summary_db <- FeatherAd_db2 %>%
+  group_by(area_habitat, elevation) %>%
+  summarise(mean_md = mean(mean_density, na.rm = TRUE),
+            se_md = sd(mean_density, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+pred_elev <- ggpredict(model_elevation, terms = "elevation [n=100]")
+
+plot_elevation<-ggplot() +
+  geom_ribbon(data = pred_elev, aes(x = x, ymin = conf.low, ymax = conf.high),
+              alpha = 0.2, fill = "grey40") +
+  geom_line(data = pred_elev, aes(x = x, y = predicted),
+            color = "black", linewidth = 1, linetype="solid") +
+  geom_errorbar(data = summary_db, aes(x = elevation, ymin = mean_md - se_md, ymax = mean_md + se_md),
+                width = 0, color = "black") +
+  geom_point(data = summary_db, aes(x = elevation, y = mean_md),
+             color = "black", size = 3) +
+  labs(x = "Elevation (m)", y = "Mean barbule density (barbule/mm)") +
+  scale_y_continuous(
+  limits = c(19.3, 22.1),           # min and max of y axis
+  breaks = seq(19.5, 22, by = 0.5)  # breaks every 2 units: 16, 18, 20, 22, 24, 26
+)+
+  theme_bw(base_size = 20) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+  )
+
+plot_elevation
+
+#ggsave("plot_elevation.png", plot = plot_elevation, width = 8, height = 7, dpi = 600)
+```
+
+```{r}
+base_colors <- c(
+  "Madrid"   = "#E63946",
+  "Lisbon"   = "#2A9D8F",
+  "Milan"    = "#457B9D",
+  "Malmo"    = "#F4A261",
+  "Gothenburg" = "#8E44AD"
+)
+
+summary_db <- FeatherAd_db2 %>%
+  group_by(area, habitat, elevation) %>%
+  summarise(mean_md = mean(mean_density, na.rm = TRUE),
+            se_md = sd(mean_density, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop") %>%
+  mutate(fill_color = ifelse(habitat == "Urban", base_colors[area], "white"))
+
+plot_elevation <- ggplot() +
+  geom_ribbon(data = pred_elev, aes(x = x, ymin = conf.low, ymax = conf.high),
+              alpha = 0.2, fill = "grey40") +
+  geom_line(data = pred_elev, aes(x = x, y = predicted),
+            color = "black", linewidth = 1, linetype = "solid") +
+  geom_errorbar(data = summary_db, aes(x = elevation, ymin = mean_md - se_md, ymax = mean_md + se_md,
+                                        color = area),
+                width = 0) +
+  geom_point(data = summary_db, aes(x = elevation, y = mean_md, color = area, fill = fill_color),
+             shape = 21, size = 4, stroke = 1.2) +
+  scale_color_manual(values = base_colors, name = "Area") +
+  scale_fill_identity() +
+  labs(x = "Elevation (m)", y = "Mean barbule density (barbules/mm)") +
+  scale_y_continuous(
+    limits = c(19.3, 22.1),
+    breaks = seq(19.5, 22, by = 0.5)
+  ) +
+  theme_bw(base_size = 20) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+
+plot_elevation
+#ggsave("plot_elevation.png", plot = plot_elevation, width = 8, height = 7, dpi = 600)
+```
+
+```{r}
+library(cowplot)
+
+base_colors <- c(
+  "Madrid"   = "#E63946",
+  "Lisbon"   = "#2A9D8F",
+  "Milan"    = "#457B9D",
+  "Malmö"    = "#F4A261",
+  "Gothenburg" = "#8E44AD"
+)
+
+FeatherAd_db2 <- FeatherAd_db2 %>%
+  mutate(area = recode(area, "Malmo" = "Malmö"))
+
+summary_db <- FeatherAd_db2 %>%
+  group_by(area, habitat, elevation) %>%
+  summarise(mean_md = mean(mean_density, na.rm = TRUE),
+            se_md = sd(mean_density, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop") %>%
+  mutate(fill_color = ifelse(habitat == "Urban", base_colors[area], "white"))
+
+# Your original working plot, just re-enable the color legend
+plot_elevation <- ggplot() +
+  geom_ribbon(data = pred_elev, aes(x = x, ymin = conf.low, ymax = conf.high),
+              alpha = 0.1, fill = "grey40") +
+  geom_line(data = pred_elev, aes(x = x, y = predicted),
+            color = "black", linewidth = 1, linetype = "solid") +
+  geom_errorbar(data = summary_db, aes(x = elevation, ymin = mean_md - se_md, ymax = mean_md + se_md,
+                                        color = area),
+                width = 0) +
+  geom_point(data = summary_db, aes(x = elevation, y = mean_md, color = area, fill = fill_color),
+             shape = 21, size = 4, stroke = 1.2) +
+  scale_color_manual(values = base_colors, name = NULL) +
+  scale_fill_identity() +
+  labs(x = "Elevation (m)", y = "Mean barbule density (barbules/mm)") +
+  scale_y_continuous(limits = c(19.3, 22.1), breaks = seq(19.5, 22, by = 0.5)) +
+  theme_bw(base_size = 20) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.key = element_blank(),
+    legend.text = element_text(size = 12),  # <-- legend size
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank()
+  ) +
+guides(
+  color = guide_legend(
+    nrow = 1,
+    override.aes = list(
+      shape = 21, 
+      size = 2.5, 
+      fill = base_colors,
+      color = base_colors  # border same as fill
+    )
+  )
+)
+
+# Separate mini plot just for the habitat key
+habitat_legend <- ggplot(data.frame(habitat = c("Urban", "Rural"),
+                                    x = c(3.1, 3.9), y = c(1, 1))) +
+  geom_point(aes(x = x, y = y, fill = habitat), 
+             shape = 21, size = 2.5, stroke = 1.2, color = "black") +
+  geom_text(aes(x = x, y = y, label = habitat), 
+            hjust = -0.3, size = 4) +
+  scale_fill_manual(values = c("Urban" = "black", "Rural" = "white")) +
+  theme_void() +
+  theme(legend.position = "none") +
+  coord_cartesian(clip = "off") +
+  xlim(0, 5) +
+  ylim(0.5, 1.5)
+
+p2<-plot_grid(plot_elevation, habitat_legend, ncol = 1, rel_heights = c(1, 0.12))
+
+p2
+#ggsave("p2.pdf", plot = p2, width = 7, height = 7, dpi = 600)
+```
+
+
+
+
+##4.2 Model temperature
+```{r}
+tmean_long <- read_csv("Eobs for salmon/tmean_long.csv")
+str(tmean_long)
+
+library(lubridate)
+
+monthly_means <- tmean_long %>%
+  filter(month(Date) %in% 5:8) %>% #get relevant months
+  mutate(month = month(Date, label = TRUE, abbr = TRUE)) %>%
+  group_by(city, area) %>%
+  summarise(mean_Tmean = mean(Tmean, na.rm = TRUE), .groups = "drop") %>% 
+  mutate(city = if_else(city == "Malmo", "Malmö", city))
+
+FeatherAd_db2<-left_join(FeatherAd_db2, monthly_means, by=c("habitat"="area", "area"="city"))
+
+model_temp <- lmer(mean_density ~ sex + age + mean_Tmean + (1|area_habitat)+ (1|area) +(1|id), data=FeatherAd_db2) 
+summary(model_temp)
+anova(model_temp) #marginal effects
+performance::check_model(model_temp)
+
+
+str(FeatherAd_db2)
+```
+
+##4.3 Solar radiation
+```{r}
+UV_values_annual_May_AU <- read_csv("UV_values_annual_&_May_AU.csv")
+
+UV_values_annual_May_AU<-UV_values_annual_May_AU %>% 
+  mutate(city = if_else(city == "Malmo", "Malmö", city))
+
+
+FeatherAd_db2_UV<-left_join(FeatherAd_db2, UV_values_annual_May_AU, by=c("area"="city", "habitat"="area"))
+
+##May-Aug
+model_UV_mayau <- lmer(mean_density ~ sex + age + UV_B_may_au + an_tmean + (1|area_habitat)+ (1|area) +(1|id), data=FeatherAd_db2_UV) 
+summary(model_UV_mayau) 
+```
+
+```{r}
+library(lme4)
+library(lmerTest)
+library(ggeffects)  
+library(ggplot2)
+library(dplyr)
+
+pred <- ggpredict(model_UV_mayau, terms = "UV_B_may_au [n=100]")
+
+raw_summary <- FeatherAd_db2_UV %>%
+  group_by(area_habitat) %>%
+  summarise(
+    UV_mean = mean(UV_B_may_au, na.rm = TRUE),
+    mean_dens = mean(mean_density, na.rm = TRUE),
+    se_dens = sd(mean_density, na.rm = TRUE) / sqrt(n()),
+    n = n()
+  )
+
+ggplot() +
+  geom_ribbon(data = pred, aes(x = x, ymin = conf.low, ymax = conf.high),
+              alpha = 0.2, fill = "steelblue") +
+  geom_line(data = pred, aes(x = x, y = predicted),
+            color = "steelblue", linewidth = 1) +
+  geom_point(data = raw_summary, aes(x = UV_mean, y = mean_dens),
+             color = "black", size = 2) +
+  geom_errorbar(data = raw_summary,
+                aes(x = UV_mean, ymin = mean_dens - se_dens, ymax = mean_dens + se_dens),
+                width = 0, color = "black") +
+  geom_text(data = raw_summary, aes(x = UV_mean, y = mean_dens, label = area_habitat),
+            vjust = -1, size = 3) +
+  labs(x = "UV-B (Jan–Aug mean)", y = "Mean density",
+       title = "Predicted trend vs. raw per-habitat means") +
+  theme_cowplot()
+```
+
+
+```{r}
+base_colors <- c(
+  "Madrid"     = "#E63946",
+  "Lisbon"     = "#2A9D8F",
+  "Milan"      = "#457B9D",
+  "Malmö"      = "#F4A261",
+  "Gothenburg" = "#8E44AD"
+)
+
+FeatherAd_db2_UV <- FeatherAd_db2_UV %>%
+  mutate(area = recode(area,
+                        "Malmo"    = "Malmö",
+                        "Goteborg" = "Gothenburg"),
+         area = factor(area, levels = names(base_colors)))
+
+
+summary_db_uv <- FeatherAd_db2_UV %>%
+  group_by(area, habitat) %>%
+  summarise(
+    UV_mean = mean(UV_B_may_au, na.rm = TRUE),
+    mean_md = mean(mean_density, na.rm = TRUE),
+    se_md   = sd(mean_density, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(fill_color = ifelse(habitat == "Urban", base_colors[as.character(area)], "white"))
+
+
+plot_UV <- ggplot() +
+  geom_ribbon(data = pred, aes(x = x, ymin = conf.low, ymax = conf.high),
+              alpha = 0.1, fill = "grey40") +
+  geom_line(data = pred, aes(x = x, y = predicted),
+            color = "black", linewidth = 1, linetype = "solid") +
+  geom_errorbar(data = summary_db_uv, aes(x = UV_mean, ymin = mean_md - se_md, ymax = mean_md + se_md,
+                                           color = area),
+                width = 0) +
+  geom_point(data = summary_db_uv, aes(x = UV_mean, y = mean_md, color = area, fill = fill_color),
+             shape = 21, size = 4, stroke = 1.2) +
+  scale_color_manual(values = base_colors, name = NULL) +
+  scale_fill_identity() +
+  labs(
+  x = expression(paste("Mean UV-B radiation (J/", m^2, "/day)")),
+  y = "Mean barbule density (barbules/mm)"
+)+
+  scale_y_continuous(limits = c(18, 22.5), breaks = seq(18, 22.5, by = 0.5)) +
+  theme_bw(base_size = 20) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.key = element_blank(),
+    legend.text = element_text(size = 12),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank()
+  ) +
+  guides(
+    color = guide_legend(
+      nrow = 1,
+      override.aes = list(
+        shape = 21,
+        size = 3.5,
+        fill  = base_colors[levels(summary_db_uv$area)],
+        color = base_colors[levels(summary_db_uv$area)]
+      )
+    )
+  )
+
+habitat_legend <- ggplot(data.frame(habitat = c("Urban", "Rural"),
+                                    x = c(3.1, 3.9), y = c(1, 1))) +
+  geom_point(aes(x = x, y = y, fill = habitat), 
+             shape = 21, size = 3.5, stroke = 1.2, color = "black") +
+  geom_text(aes(x = x, y = y, label = habitat), 
+            hjust = -0.3, size = 4) +
+  scale_fill_manual(values = c("Urban" = "black", "Rural" = "white")) +
+  theme_void() +
+  theme(legend.position = "none") +
+  coord_cartesian(clip = "off") +
+  xlim(0, 5) +
+  ylim(0.5, 1.5)
+
+p3 <- plot_grid(plot_UV, habitat_legend, ncol = 1, rel_heights = c(1, 0.12))
+
+p3
+
+ggsave("Plots brevia/p3.pdf", plot = p3, width = 7, height = 7, dpi = 600)
+
+library(egg)
+
+p1_fixed <- set_panel_size(p1, width = unit(5, "in"), height = unit(5, "in"))
+p2_fixed <- set_panel_size(plot_elevation, width = unit(5, "in"), height = unit(5, "in"))
+p3_fixed <- set_panel_size(plot_UV,        width = unit(5, "in"), height = unit(5, "in"))
+
+ggsave("Plots brevia/p3_fixed.pdf", plot = p3_fixed, width = 9, height = 7, dpi = 600)
+ggsave("Plots brevia/p2_fixed.pdf", plot = p2_fixed, width = 9, height = 7, dpi = 600)
+ggsave("Plots brevia/p1_fixed.pdf", plot = p1_fixed, width = 9, height = 7, dpi = 600)
+```
+
+
